@@ -1,319 +1,344 @@
-local Service = {}
 --//Services//--
 local Players = game:GetService("Players")
-local DataStoreService = game:GetService("DataStoreService")
-local HttpService = game:GetService("HttpService")
+local ServerScriptService = game:GetService("ServerScriptService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 --//End of "Services"//--
 
 
 
 --//Misc.//--
-local DataStore, BackupStore, MetadataStore = nil, nil, DataStoreService:GetDataStore("TESTINGMETADATAV0000")
+local Container = ReplicatedStorage.Container
+local ContainerEvents = Container.Events
+local NotificationEvents = ContainerEvents.Notification
+local ServerNotification, PlayerNotification = NotificationEvents.ServerNotification, NotificationEvents.PlayerNotification
+
+local ScriptContainer = ServerScriptService.Container
+local DataScripts = ScriptContainer.DataScripts
+local ProfileService = require(DataScripts.ProfileService)
+
+local GameEvents = ContainerEvents.Game
+local Gravity = GameEvents.Gravity
+
+local BadgeEvents = ContainerEvents.Badges
+local BadgeGive = BadgeEvents.Give
+
+
+local SFX = ReplicatedStorage.SFX
+local RoundSounds = SFX.RoundSounds:GetChildren()
+
+
+local Events = script:GetChildren()
+local Plates = workspace.Plates
+
+local Winner = nil
+local AccurateGravity = workspace.Gravity
+
+local Min = 2
 --//End of "Misc."//--
 
 
 
 --//Arrays//--
-Service.Profiles = {}
-local Cache = {}
-local settings = {
-	StoreName = "";
-	Version = 0;
-	Template = {};
-	DebugPriority = (game:GetService("RunService"):IsStudio() and 0) or math.huge;
-	ReadDataAccess = false;
-	MergeOld = nil;
-	CacheFrequency = 30;
-}
-local TemplateMetadata = {
-	SessionCount = 1;
-	LastLoaded = 0;
-	LastUnloaded = 0;
-	LastServer = 0;
-	LastStoreName = settings.StoreName;
-	LastVersion = settings.Version;
-	LastPlaceId = game.PlaceId;
-	Purged = false;
-}
+local AlivePlayers = {}
+local EventsList = {}
 --//End of "Arrays"//--
 
 
 
 --//Main Functions//--
-local function GetPlayerFromAny(StartArg)
-	if typeof(StartArg) == "Instance" then if StartArg.Parent == Players then return StartArg end; return Players:FindFirstChild(StartArg.Name);
-	elseif typeof(StartArg) == "string" then return Players:FindFirstChild(StartArg); 
-	else return Players:GetPlayerByUserId(StartArg); end;
+local function Lerp(a, b, t) return a + ((b - a) * t); end;
+local function ResetWorkspaceSettings()
+	workspace.Gravity = AccurateGravity
+	
 end
-local function GetUserIdFromAny(StartArg)
-	if typeof(StartArg) == "Instance" then if StartArg.Parent == Players then local Player = StartArg return Player.UserId end; return (Players:FindFirstChild(StartArg.Name) and Players:FindFirstChild(StartArg.Name).UserId) or nil;
-	elseif typeof(StartArg) == "string" then return Players:GetUserIdFromNameAsync(StartArg); 
-	else return StartArg end;
-end
-local function Reconcile(Data, Template)
-	if not Data then Data = {} end;
-	for TemplateProperty, TemplateValue in pairs(Template) do
-		if not Data[TemplateProperty] then Data[TemplateProperty] = TemplateValue end;
+
+local function ResetGameInstance()
+	for _, Folder in pairs(workspace.GameInstance:GetChildren()) do
+		if Folder then Folder:ClearAllChildren() end
+		
 	end
-	return Data;
+	
 end
-local function PriorityMessage(Level: number, Message: string, Type) if Level < settings.DebugPriority then return end; Type(Message); end;
-local function LoadData(Profile, UserId)
-	UserId = tostring(GetUserIdFromAny(UserId))
 
-	local function PrepareData(Data)
-		if Data then Data = HttpService:JSONDecode(Data) else Data = {} end
+local function ChooseEvent(PlayerSet: {}, Rating: number)
+	local ChosenModule = nil
+	while ChosenModule == nil do
+		for EventIdx, Event in ipairs(Events) do
+			local Choice = math.random(1, Event:GetAttribute("Bias"))
+			if Choice == Event:GetAttribute("Bias") then ChosenModule = Event Event:SetAttribute("Bias", Event:GetAttribute("Bias") + 1) break end
+			if Event:GetAttribute("Bias") >= 10 then Event:SetAttribute("Bias", 2) end -- Resets attributes
+			
+		end
+		task.wait()
+	end
+	
+	ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-1",ChosenModule:GetAttribute("Message"),{.75 * (1/Rating), Enum.EasingStyle.Exponential}, {Resolution = 50}, 1.25 * (1/Rating) )
+	task.wait(2.5)
+	local Message = require(ChosenModule)(PlayerSet, Rating)
+	if Rating < 3 then
+		task.delay(3, ServerNotification.FireAllClients, ServerNotification, tostring(coroutine.running()) .. "-2",Message,{.75 * (1/Rating), Enum.EasingStyle.Exponential}, {Resolution = 50}, 2 * (1/Rating))
+	end
+	table.insert(EventsList, ChosenModule.Name)
+	
+end
 
-		Data = Reconcile(Data, settings.Template)
-		local function DeepSet(CurrentPtr, DataPtr)
-			for CurrentPt, DataPt in pairs(DataPtr) do
-				if DataPt then
-					if typeof(DataPt) == "table" then CurrentPtr[CurrentPt] = {}; DeepSet(CurrentPtr[CurrentPt], DataPt); else CurrentPtr[CurrentPt] = DataPt; end
-
-				end
-
-			end
+local function GetAlive()
+	local Characters = {}
+	for _, Plate in pairs(workspace.Plates:GetChildren()) do
+		if Plate and workspace:FindFirstChild(Plate.Name) and workspace[Plate.Name].Humanoid.Health > 0 then
+			table.insert(Characters, Players[Plate.Name])
 
 		end
-		DeepSet(Profile.Data, Data)
-
-		Profile.Signals.Loaded.Succeeded:Fire(Data)
 
 	end
 
-	local Data = Cache[UserId]
-	if Data ~= nil then PrepareData(Data) return end;
-	PriorityMessage(1, "Data was not in Cache!", print)
+	return Characters
+end
 
-	local Success, Data = pcall(DataStore.GetAsync, DataStore, UserId)
-	if Success and Data then PrepareData(Data) return end;
-	PriorityMessage(math.huge, "Data did not load!", warn)
-
-	local Success, Data = pcall(BackupStore.GetAsync, BackupStore, UserId)
-	if Success and Data then PrepareData(Data) return end;
-	PriorityMessage(math.huge, "Data did not load in backup!", warn)
-
-	if (settings.MergeOld == nil or Profile.Metadata.LastPlaceId ~= game.PlaceId) and (Profile.Metadata.LastVersion == settings.Version and Profile.Metadata.LastStoreName == settings.StoreName) then Profile.Signals.Loaded.Failed:Fire() return end;
-	local LastStore = DataStoreService:GetDataStore(Profile.Metadata.LastStoreName .. "+" .. Profile.Metadata.LastVersion)
-	if settings.MergeOld ~= nil then LastStore = DataStoreService:GetDataStore(settings.MergeOld) end
-	if settings.MergeOld ~= false then
-		local Success, Data = pcall(LastStore.GetAsync, LastStore, UserId)
-		if Success and Data then PrepareData(Data) return end;
-
+local function PlayerHandler(Player: Player)
+	Player:SetAttribute("RoundSynergy", 0)
+	local Plate = workspace.Plates[Player.Name]
+	local Character = Player.Character
+	
+	local Profile = ProfileService.Profiles[Player]
+	if Profile then
+		Character.Humanoid:SetAttribute("NormalMaxHealth", Lerp(82,118, math.abs(50 - math.clamp(Profile.Data.Synergy, -50, 50))/100))
+		Character.Humanoid.MaxHealth = Character.Humanoid:GetAttribute("NormalMaxHealth")
+		Character.Humanoid.Health = Character.Humanoid:GetAttribute("NormalMaxHealth")
+		for _, Cosmetic in pairs(Profile.Data.CurrentCosmetics) do
+			local ReplicatedCosmetic = Container.Misc.Cosmetics:FindFirstChild(Cosmetic)
+			if Cosmetic and ReplicatedCosmetic then
+				if ReplicatedCosmetic.ClassName == "Texture" then
+					for _, Face in pairs(Enum.NormalId:GetEnumItems()) do
+						local NewCosmetic = ReplicatedCosmetic:Clone()
+						NewCosmetic.Parent = Plate
+						NewCosmetic.Face = Face
+						NewCosmetic.Name ..= "-" .. tostring(Face)
+						
+					end
+				else
+					local ClonedCosmetic = ReplicatedCosmetic:Clone()
+					ClonedCosmetic.Parent = Plate 
+					
+				end
+				
+			end
+			
+		end
+		
 	end
-	PriorityMessage(1, "This is a new player!", warn)
-	PrepareData({})
+
+	Character.Humanoid.Died:Wait()
+	table.remove(AlivePlayers,table.find(AlivePlayers, Player))
+	if AlivePlayers[1] then
+		Winner = AlivePlayers[1].Name
+		
+	end
+	
+	if Character:FindFirstChild("Torso") then
+		for _, Obj in pairs(Character.Torso:GetChildren()) do
+			if Obj and Obj.ClassName == "StringValue" and Obj.Name:find("Bind_") then workspace[Obj.Value].Humanoid.Health = 0; end;
+		end
+		
+	end
+	
+	Gravity:FireClient(Player, workspace.Gravity)
+	ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-1",Player.Name .. " has fallen.",{.75, Enum.EasingStyle.Exponential}, {Resolution = 50}, 1.25)
+
+	TweenService:Create(Plate, TweenInfo.new(3, Enum.EasingStyle.Linear), {
+		Position = Plate.Position - Vector3.new(0,3,0);
+		Transparency = 1;
+	}):Play()
+	task.wait(3)
+	
+	Plate:Destroy()
+
 end
-local function SaveData(Data, UserId)
-	Data = HttpService:JSONEncode(Data)
-	UserId = tostring(GetUserIdFromAny(UserId))
-	local function Transformer(OldData) return (Data ~= nil and Data) or OldData end;
-	local Success, Err = true, nil
 
-	local SuccessMain, ErrMain = pcall(DataStore.UpdateAsync, DataStore, UserId, Transformer)
-	if not Success then if Success then Success = false; Err = ErrMain; end;  PriorityMessage(3, ErrMain, warn) end;
+local function UpdateSynergy(Player)
+	if not Player then return; end;
+	if not Player:GetAttribute("RoundSynergy") then return; end;
+	local Profile = ProfileService.Profiles[Player] if not Profile then return; end;
+	Profile.Data("Increment", "Synergy", Player:GetAttribute("RoundSynergy"))
+	
+	PlayerNotification:FireClient(Player, "Your synergy has changed.", 3)
 
-	local SuccessBackup, ErrBackup = pcall(BackupStore.UpdateAsync, BackupStore, UserId, Transformer)
-	if not SuccessBackup then if Success then Success = false; Err = ErrBackup; end; PriorityMessage(3, ErrBackup, warn) end;
-
-	return Success, Err
 end
-local function AttemptCache() for UserId, Data in pairs(Cache) do if SaveData(Data, UserId) then Cache[UserId] = nil end end; end;
 
+local function ChoosePlate()
+	local Plate = nil
+	while Plate == nil do
+		local AllPlates = workspace.Plates:GetChildren()
+		local RanPlate = AllPlates[math.random(1, #AllPlates)]
+		if RanPlate.Name == "Plate" then Plate = RanPlate end
+		task.wait()
+	end
+	return Plate
+end
+
+local function NewAlive()
+	local Characters = {}
+	AlivePlayers = Players:GetChildren()
+	for _, Player in pairs(Players:GetChildren()) do
+		local Character = Player.Character or workspace:FindFirstChild(Player.Name)
+		if Player and Character and not Character:GetAttribute("AFK") and Character.Humanoid.Health > 0 then
+			local GivenPlate = ChoosePlate()
+			
+			--Player.Character:Destroy()
+			Player:LoadCharacter()
+			--Player.Character:SetAttribute("Divine", true)
+			if not Player.Character then Player.CharacterAdded:Wait() end
+			
+			task.spawn(UpdateSynergy, Player)
+			table.insert(Characters, Character)
+			GivenPlate.Name = Player.Name
+			Player.Character:MoveTo(GivenPlate.Position)
+			task.spawn(PlayerHandler, Player)
+			
+		end
+		
+	end
+	
+	for _, Plate in pairs(workspace.Plates:GetChildren()) do
+		if Plate and Plate.Name == "Plate" then Plate:Destroy() end
+	end
+	
+	return Characters
+end
+
+local function PlayRoundSound()
+	local Sound = RoundSounds[math.random(1, #RoundSounds)]:Clone()
+	Sound.Parent = workspace
+	Sound.PlayOnRemove = true
+	Sound:Destroy()
+	
+end
+
+local function GiveTokens()
+	local function GivePlayer(Player)
+		local Profile = ProfileService.Profiles[Player]
+		if not Profile then print("MISSING PROFILE!") Player:LoadCharacter() game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, Player) return end;
+		if not Profile.Data then print("MISSING DATA!!!") return end;
+		if not Profile.Data.Tokens then print("MISSING TOKENS!!!") return end;
+		PlayerNotification:FireClient(Player, "You've gained a token for surviving an event.", 3); 
+		Profile.Data("Increment", "Tokens", 1)
+		
+	end
+	
+	for _, Player in pairs(GetAlive()) do
+		if Player then 
+			task.spawn(GivePlayer, Player)
+			
+		end
+		
+	end
+	
+end
+local function GiveBadge(PlayerTable, Id)
+	for _, Player in pairs(PlayerTable) do
+		if Player then BadgeGive:Fire(Player.UserId, Id); end;
+		
+	end
+	
+end
 --//End of "Main Functions"//--
 
 
 
 --//Main//--
-function Service:Purge(UserId) 
-	UserId = tostring(GetUserIdFromAny(UserId))
-	local Success, Err = pcall(DataStore.RemoveAsync, DataStore, UserId)
-	if not Success then PriorityMessage(math.huge, Err, warn) return end; -- Debug.
-	local Success, Err = pcall(BackupStore.RemoveAsync, BackupStore, UserId)
-	if not Success then PriorityMessage(math.huge, Err, warn) return end; -- Debug.
+function Main()
+	Plates.Parent = game
+	
+	table.sort(Events, function(A, B) return A:GetAttribute("Bias") < B:GetAttribute("Bias") end)
+	task.wait(2)
+	
+	while true do
+		if #game.Players:GetChildren() < Min then
+			ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-1","Minimum of 2 Players Required!",{.85, Enum.EasingStyle.Exponential}, {Resolution = 50}, math.huge)
+			repeat task.wait(1) until #game.Players:GetChildren() >= Min
+			
+		end
+		
+		
+		
+		local firstTick = tick()
+		ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-2","New Round Begins Shortly.",{.85, Enum.EasingStyle.Exponential}, {Resolution = 50}, 1.8)
 
-	local Player = GetPlayerFromAny(UserId)
-	if not Player then PriorityMessage(1, "Player doesn't exist on purge, player will not be kicked.", print) return end;
+		task.wait(3)
+		
+		
+		if workspace:FindFirstChild("Plates") then workspace.Plates:Destroy() end
+		Plates:Clone().Parent = workspace
+		Winner = nil
 
-	local Profile = self.Profiles[Player]
-	if not Profile then PriorityMessage(1, "Profile doesn't exist on purge, purged signal will not be fired.", print) return end;
-	if not Profile.Signals.Purged then PriorityMessage(1, "Signal doesn't exist on purge, purged signal will not be fired.", print) return end;
+		local ValidCharacters = NewAlive()
+		for _, Character in pairs(ValidCharacters) do
+			Character:MoveTo(workspace.Plates[Character.Name].Position)
 
-	Profile.Signals.Purged:Fire()
-	Profile.Metadata.Purged = true
-	pcall(MetadataStore.UpdateAsync, MetadataStore, UserId, function(...) return Reconcile(Profile.Metadata, TemplateMetadata) or ... end)
+		end
 
-end
-
-function Service.Initialize(Settings: {[string]: any})
-	for Property, Value in pairs(Settings) do settings[Property] = Value end
-	DataStore = DataStoreService:GetDataStore(settings.StoreName .. "+" .. settings.Version)
-	BackupStore = DataStoreService:GetDataStore(settings.StoreName .. "+" .. settings.Version .. "_Backup")
-
-end
-function Service.New(Player: Player)
-
-	local ReadAccessPort = nil
-	task.spawn(function()
-		if not settings.ReadDataAccess then return end;
-		if settings.ReadDataAccess:FindFirstChild(Player.Name) then return end;
-		ReadAccessPort = Instance.new("Folder")
-		ReadAccessPort.Name = Player.Name
-		ReadAccessPort.Parent = settings.ReadDataAccess
-
-	end)
-
-	local Profile = {
-		Data = nil;
-		Signals = {
-			Loaded = {Succeeded = Instance.new("BindableEvent"), Failed = Instance.new("BindableEvent")},
-			Corruption = Instance.new("BindableEvent"),
-			Purged = Instance.new("BindableEvent"),
-			ListenToRelease = Instance.new("BindableEvent"),
-		};
-		ReadAccess = (ReadAccessPort ~= nil and ReadAccessPort) or nil,
-		Metadata = table.clone(TemplateMetadata);
-	}
-	local Success, Data = pcall(MetadataStore.GetAsync, MetadataStore, Player.UserId)
-	Data = HttpService:JSONDecode(Data)
-	Profile.Metadata = Reconcile(Data, TemplateMetadata)
-
-	print(Profile.Metadata)
-	function Profile:Release()
-		Profile.Metadata.LastUnloaded = tick()
-		Profile.Metadata.LastServer = game.JobId or "StudioServer"
-		Profile.Metadata.LastStoreName = settings.StoreName
-		Profile.Metadata.LastVersion = settings.Version
-
-		PriorityMessage(1, "Profile of " .. Player.Name .. " released!", print)
-		PriorityMessage(1, Profile.Metadata.LastVersion, print)
-		PriorityMessage(1, settings.Version, print)
-		PriorityMessage(1, Profile.Metadata, print)
-
-		local EncodedMetadata = HttpService:JSONEncode(Profile.Metadata)
-		pcall(MetadataStore.UpdateAsync, MetadataStore, Player.UserId, function(OldMetadata) return (EncodedMetadata ~= nil and EncodedMetadata) or OldMetadata end)
-
-		Profile.Signals.ListenToRelease:Fire()
-
-		local function ThoroughDestroy(Table)
-			for _, Signal in pairs(Table) do
-				if Signal then
-					if typeof(Signal) == "table" then ThoroughDestroy(Signal) 
-					else Signal:Destroy()
-					end;
-
-				end
-
+		local Rate = 16
+		local Rating = 1
+		
+		EventsList = {}
+		local function EventDistance(Event1: string, Event2: string)
+			if not table.find(EventsList, Event1) then return math.huge end;
+			local Event1Idx = table.find(EventsList, Event1)
+			if not table.find(EventsList, Event2) then return math.huge end;
+			local Event2Idx = table.find(EventsList, Event2)
+			return math.abs(Event1Idx - Event2Idx)
+		end
+		while #GetAlive() >= Min do
+			if Rating < math.clamp(math.floor(((tick()-firstTick)/120)), 1, 5) then
+				ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-3","The difficulty is now " .. math.clamp(math.floor(((tick()-firstTick)/10)), 1, 5) .. "!",{.85, Enum.EasingStyle.Exponential}, {Resolution = 50}, 1.8)
+				Rating = math.clamp(math.floor(((tick()-firstTick)/120)), 1, 5)
+				task.wait(3.5)
 			end
-
+			
+			PlayRoundSound()
+			GiveTokens()
+			
+			task.spawn(ChooseEvent, GetAlive(), math.clamp(math.floor(((tick()-firstTick)/120)), 1, 5))
+			if EventDistance("PlateNature","PlateDryer") == 1 then GiveBadge(Players:GetChildren(), 2148326848) end -- Demeters Karma Badge.
+			task.wait(Rate * (1/Rating))
+			
+			
 		end
-		ThoroughDestroy(Profile.Signals)
-		if SaveData(Profile.Data, Player.UserId) then return end;
-
-		Cache[Player.UserId] = Profile.Data
-		Service.Profiles[Player] = nil
-		gcinfo()
-	end
-	if Profile.ReadAccess then 
-		local function DataMeta(BaseFolder)
-			return {
-				__newindex = function(self, index, data)
-					if not rawget(self, index) then
-						local Type = nil
-						if typeof(data) == "string" then Type = "StringValue"
-						elseif typeof(data) == "number" then Type = "NumberValue"
-						elseif typeof(data) == "Instance" then Type = "ObjectValue"
-						elseif typeof(data) == "Color3" then Type = "Color3Value"
-						elseif typeof(data) == "BrickColor" then Type = "BrickColorValue"
-						elseif typeof(data) == "CFrame" then Type = "CFrameValue"
-						elseif typeof(data) == "Vector3" then Type = "Vector3Value"
-						elseif typeof(data) == "boolean" then Type = "BoolValue"	
-						elseif typeof(data) == "table" then Type = "Folder"
-						end
-
-						local NewInstance = Instance.new(Type)
-						NewInstance.Name = index
-						NewInstance.Parent = BaseFolder
-
-						if Type == "Folder" then rawset(self, index,  setmetatable({}, DataMeta(NewInstance))); return end;
-						NewInstance.Value = data
-
-					end;
-					rawset(self, index, data);
-
-				end,
-				__call = function(self, transform_type: string, index, data)
-					if rawget(self, index) then 
-						if transform_type:lower() == "increment" then rawset(self, index, rawget(self, index) + data) BaseFolder:FindFirstChild(index).Value = rawget(self, index);
-						elseif transform_type:lower() == "set" then 
-							if data == "__REMOVE__" then 
-								if BaseFolder:FindFirstChild(index) then BaseFolder:FindFirstChild(index):Destroy() end
-								rawset(self, index, nil) 
-								return 
-							end; 
-							rawset(self, index, data)
-							BaseFolder:FindFirstChild(index).Value = rawget(self, index) 
-						end
-					else
-						if data == "__REMOVE__" then return end;
-						local Type = nil
-						if typeof(data) == "string" then Type = "StringValue"
-						elseif typeof(data) == "number" then Type = "NumberValue"
-						elseif typeof(data) == "Instance" then Type = "ObjectValue"
-						elseif typeof(data) == "Color3" then Type = "Color3Value"
-						elseif typeof(data) == "BrickColor" then Type = "BrickColorValue"
-						elseif typeof(data) == "CFrame" then Type = "CFrameValue"
-						elseif typeof(data) == "Vector3" then Type = "Vector3Value"
-						elseif typeof(data) == "boolean" then Type = "BoolValue"	
-						elseif typeof(data) == "table" then Type = "Folder"
-						end
-
-						local NewInstance = Instance.new(Type)
-						NewInstance.Name = index
-						NewInstance.Parent = BaseFolder
-
-						if Type == "Folder" then rawset(self, index,  setmetatable({}, DataMeta(NewInstance))); return end;
-						NewInstance.Value = data
-						rawset(self, index, data);
-					end;
-
-				end,
-			}
-		end
-		Profile.Data = setmetatable({}, DataMeta(Profile.ReadAccess))
-
-	else
-		Profile.Data = {}
-
-	end
-
-	task.spawn(LoadData, Profile, GetUserIdFromAny(Player))
-
-	Player.AncestryChanged:Once(function() Profile:Release() end)
-	Service.Profiles[Player] = Profile
-	return Profile
-end
-function CacheMain()
-	while task.wait(settings.CacheFrequency) do
-		for _, Player in pairs(Players:GetChildren()) do
-			if Player and Service.Profiles[Player] and not Cache[Player.UserId] then
-				Cache[Player.UserId] = Service.Profiles[Player].Data
-
+		
+		if game.Players:FindFirstChild(Winner) then
+			local Profile = ProfileService.Profiles[game.Players:FindFirstChild(Winner)]
+			if Profile then
+				Profile.Data("Increment", "Wins", 1)
 			end
-
+			
 		end
-		task.spawn(AttemptCache)
-
+		
+		if GetAlive()[1] then Players[GetAlive()[1].Name]:LoadCharacter() end;
+		
+		task.spawn(ResetGameInstance)
+		task.spawn(ResetWorkspaceSettings)
+		
+		ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-4", ((Winner ~= nil and Winner) or "") .. " won this match after " .. math.floor((tick()-firstTick)/60) .. " minute(s)!",{.85, Enum.EasingStyle.Exponential}, {Resolution = 50}, 1.8)
+		
+		task.wait(4)
+		ServerNotification:FireAllClients(tostring(coroutine.running()) .. "-5", "Intermission",{.85, Enum.EasingStyle.Exponential}, {Resolution = 50}, math.huge)
+		task.wait(25)
+		
 	end
-
+	
 end
-
+function PlayerRemoving(Player)
+	if not workspace:FindFirstChild("Plates") then return end;
+	if not workspace.Plates:FindFirstChild(Player.Name) then return end;
+	workspace.Plates:FindFirstChild(Player.Name):Destroy();
+	
+end
 --//End of "Main"//--
 
 
 
 --//Connections//--
-task.spawn(CacheMain)
-game:BindToClose(AttemptCache)
-return Service
+task.spawn(Main)
+Players.PlayerRemoving:Connect(PlayerRemoving)
 --//End of "Connections"//--
